@@ -16,7 +16,7 @@ export function UploadZone() {
       const form = new FormData();
       form.append("file", file);
 
-      const res = await fetch("http://localhost:8080/upload", {
+      const res = await fetch("/api/backend/upload", {
         method: "POST",
         body: form,
       });

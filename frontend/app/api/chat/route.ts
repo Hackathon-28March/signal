@@ -9,6 +9,7 @@ import {
 } from "ai";
 import { z } from "zod";
 
+// Server-side: use direct backend URL (no browser proxy needed)
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8080";
 

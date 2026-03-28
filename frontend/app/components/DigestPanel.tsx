@@ -20,7 +20,7 @@ export function DigestPanel() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/digest`);
+      const res = await fetch(`/api/backend/digest`);
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const data = await res.json();
       setDigest(data);
