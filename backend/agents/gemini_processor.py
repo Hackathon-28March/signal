@@ -88,7 +88,22 @@ async def gemini_process(input: GeminiInput) -> GeminiOutput:
     if input.signal_type == "audio":
         # Write audio to temp file and upload to Gemini Files API
         audio_bytes = base64.b64decode(input.content)
-        suffix = ".mp3"
+
+        # Detect format from magic bytes
+        magic = audio_bytes[:12]
+        if magic[:4] == b'RIFF' and magic[8:12] == b'WAVE':
+            suffix, mime_type = ".wav", "audio/wav"
+        elif magic[:3] == b'ID3' or magic[:2] == b'\xff\xfb':
+            suffix, mime_type = ".mp3", "audio/mp3"
+        elif magic[4:8] in (b'ftyp', b'moov') or magic[:4] in (b'\x00\x00\x00\x18', b'\x00\x00\x00\x1c'):
+            suffix, mime_type = ".m4a", "audio/mp4"
+        elif magic[:4] == b'OggS':
+            suffix, mime_type = ".ogg", "audio/ogg"
+        elif magic[:4] == b'fLaC':
+            suffix, mime_type = ".flac", "audio/flac"
+        else:
+            suffix, mime_type = ".mp3", "audio/mp3"  # fallback
+
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             f.write(audio_bytes)
             tmp_path = f.name
@@ -96,10 +111,17 @@ async def gemini_process(input: GeminiInput) -> GeminiOutput:
         try:
             uploaded = client.files.upload(
                 file=tmp_path,
-                config=types.UploadFileConfig(mime_type="audio/mpeg"),
+                config=types.UploadFileConfig(mime_type=mime_type),
             )
+            # Wait for file to become ACTIVE
+            import time
+            for _ in range(20):
+                file_info = client.files.get(name=uploaded.name)
+                if file_info.state.name == "ACTIVE":
+                    break
+                time.sleep(1)
             contents = [
-                types.Part.from_uri(file_uri=uploaded.uri, mime_type=uploaded.mime_type),
+                types.Part.from_uri(file_uri=uploaded.uri, mime_type=mime_type),
                 types.Part.from_text(text=
                     "Transcribe this customer call recording and classify the signal. " + SYSTEM_PROMPT
                 ),
