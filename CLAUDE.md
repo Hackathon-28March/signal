@@ -89,6 +89,110 @@ signal-agent/
 
 ---
 
+## Person 2 — Backend Integration Instructions (updated Mar 28)
+
+Person 1's backend is **fully complete**. All you need to do is wire `main.py` to call it.
+
+### What exists in backend/ right now
+
+```
+backend/
+├── pipeline.py              ← ENTRY POINT — call run_pipeline() from here
+├── agents/
+│   ├── transcriber.py       ← Whisper API (audio → text)
+│   ├── classifier.py        ← GPT-4o (text → BUG/FEATURE_REQUEST/CHURN_RISK/PRAISE/QUESTION)
+│   ├── memory.py            ← Senso CLI (search + ingest)
+│   ├── router.py            ← routing rules (BUG→Jira, CHURN→Slack, etc.)
+│   └── digest.py            ← CEO digest generator (call generate_digest())
+├── integrations/
+│   ├── jira.py              ← creates real Jira tickets
+│   ├── notion.py            ← creates real Notion roadmap items
+│   └── slack.py             ← sends real Slack alerts (also has send_test_message())
+```
+
+### Wiring pipeline.py into main.py
+
+**POST /upload (audio file):**
+```python
+from pipeline import run_pipeline
+
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    import base64
+    content = base64.b64encode(await file.read()).decode()
+    await run_pipeline({"type": "audio", "content": content}, broadcast=broadcast)
+    return {"ok": True}
+```
+
+**POST /webhook/email:**
+```python
+@app.post("/webhook/email")
+async def email_webhook(payload: dict):
+    body = payload.get("text") or payload.get("body") or str(payload)
+    await run_pipeline({"type": "email", "content": body}, broadcast=broadcast)
+    return {"ok": True}
+```
+
+**POST /monitor (manual demo trigger):**
+```python
+@app.post("/monitor")
+async def monitor(payload: dict):
+    await run_pipeline({
+        "type": payload.get("type", "email"),
+        "content": payload.get("content", ""),
+    }, broadcast=broadcast)
+    return {"ok": True}
+```
+
+**GET /digest:**
+```python
+from agents.digest import generate_digest
+
+@app.get("/digest")
+async def get_digest():
+    return generate_digest()
+```
+
+### broadcast() — how it works
+
+`run_pipeline` accepts a sync `broadcast(event: dict)` callback. Call it like this:
+
+```python
+def broadcast(event: dict):
+    # push to your SSE queue here
+    sse_queue.put_nowait(event)
+```
+
+Event shape:
+```python
+{
+  "stage": "TRANSCRIBE"|"CLASSIFY"|"MEMORY"|"ROUTE"|"JIRA"|"NOTION"|"SLACK"|"SENSO"|"SYSTEM",
+  "type": "info"|"success"|"warning"|"error",
+  "message": "Ticket SCRUM-5 created",
+  "meta": {"url": "...", "ticket_key": "SCRUM-5"}   # optional
+}
+```
+
+### Turn off demo events once pipeline is wired
+Add to `.env`:
+```
+DEMO_TEST_EVENTS=false
+```
+
+### Senso CLI — required on the server
+The backend uses `@senso-ai/cli` for memory. Install it:
+```bash
+npm install -g @senso-ai/cli
+```
+
+### Test the pipeline standalone
+```bash
+cd backend
+python3 pipeline.py 3   # runs all 3 signal types end-to-end
+```
+
+---
+
 ## Person 1 — Pull & Run Instructions (updated Mar 28)
 
 After pulling, Person 1 needs to do the following on their machine:
