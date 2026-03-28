@@ -24,6 +24,42 @@ class JiraTicketOutput(BaseModel):
     url: str
 
 
+def _find_existing_ticket(company: str, auth: str, base_url: str) -> dict | None:
+    """
+    Search for an open signal-agent ticket for this company.
+    Returns {'ticket_key', 'url'} if found, else None.
+    """
+    project = os.environ["JIRA_PROJECT_KEY"]
+    jql = f'project = {project} AND labels = "signal-agent" AND summary ~ "\\"{company}\\"" AND statusCategory != Done ORDER BY created DESC'
+    r = requests.get(
+        f"{base_url}/rest/api/3/search/jql",
+        headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
+        params={"jql": jql, "maxResults": 1, "fields": "summary,status"},
+        timeout=10,
+    )
+    if not r.ok:
+        return None
+    issues = r.json().get("issues", [])
+    if not issues:
+        return None
+    key = issues[0]["key"]
+    return {"ticket_key": key, "url": f"{base_url}/browse/{key}"}
+
+
+def _add_comment(ticket_key: str, comment: str, auth: str, base_url: str) -> None:
+    """Add a comment to an existing Jira ticket."""
+    requests.post(
+        f"{base_url}/rest/api/3/issue/{ticket_key}/comment",
+        headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
+        json={"body": {
+            "type": "doc", "version": 1,
+            "content": [{"type": "paragraph",
+                         "content": [{"type": "text", "text": comment}]}],
+        }},
+        timeout=10,
+    )
+
+
 @rt.function_node
 async def create_jira_ticket(ticket: JiraTicketInput) -> JiraTicketOutput:
     """
@@ -35,6 +71,26 @@ async def create_jira_ticket(ticket: JiraTicketInput) -> JiraTicketOutput:
     ).decode()
 
     base_url = os.environ["JIRA_BASE_URL"].rstrip("/")
+
+    # Extract company from summary (format: "... — CompanyName")
+    company = ticket.summary.split("—")[-1].strip() if "—" in ticket.summary else ""
+
+    # Check for existing open ticket for this company — avoid duplicates
+    if company:
+        existing = _find_existing_ticket(company, auth, base_url)
+        if existing:
+            comment = (
+                f"Another signal received from {company}.\n\n"
+                f'Customer said: "{ticket.customer_quote[:300]}"\n\n'
+                f"{ticket.description}"
+            )
+            _add_comment(existing["ticket_key"], comment, auth, base_url)
+            print(f"[jira] Existing ticket {existing['ticket_key']} updated (no duplicate created)")
+            return JiraTicketOutput(
+                ticket_key=existing["ticket_key"],
+                url=existing["url"],
+            )
+
     body_text = f'Customer said: "{ticket.customer_quote}"\n\n{ticket.description}'
 
     payload = {
