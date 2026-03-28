@@ -1,5 +1,13 @@
 name: signal-agent
 
+ingress:
+  rules:
+    - component:
+        name: frontend
+      match:
+        path:
+          prefix: /
+
 services:
   - name: backend
     source_dir: backend
