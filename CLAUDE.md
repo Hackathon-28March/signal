@@ -97,17 +97,20 @@ Person 1's backend is **fully complete**. All you need to do is wire `main.py` t
 
 ```
 backend/
-├── pipeline.py              ← ENTRY POINT — call run_pipeline() from here
+├── pipeline.py                  ← ENTRY POINT — call run_pipeline() from here
 ├── agents/
-│   ├── transcriber.py       ← Whisper API (audio → text)
-│   ├── classifier.py        ← GPT-4o (text → BUG/FEATURE_REQUEST/CHURN_RISK/PRAISE/QUESTION)
-│   ├── memory.py            ← Senso CLI (search + ingest)
-│   ├── router.py            ← routing rules (BUG→Jira, CHURN→Slack, etc.)
-│   └── digest.py            ← CEO digest generator (call generate_digest())
+│   ├── transcriber.py           ← Whisper API (audio → text, fallback if no Gemini key)
+│   ├── classifier.py            ← GPT-4o (text → BUG/FEATURE_REQUEST/CHURN_RISK/PRAISE/QUESTION)
+│   ├── gemini_processor.py      ← Gemini 2.5 Flash (audio+text → classification in ONE call)
+│   ├── memory.py                ← Senso CLI (search + ingest via @senso-ai/cli subprocess)
+│   ├── router.py                ← routing rules (BUG→Jira, CHURN→Slack+Email, etc.)
+│   ├── digest.py                ← CEO digest generator (call generate_digest())
+│   └── email_poller.py          ← Gmail IMAP poller (watches inbox every 30s)
 ├── integrations/
-│   ├── jira.py              ← creates real Jira tickets
-│   ├── notion.py            ← creates real Notion roadmap items
-│   └── slack.py             ← sends real Slack alerts (also has send_test_message())
+│   ├── jira.py                  ← creates Jira tickets, deduplicates by company
+│   ├── notion.py                ← creates Notion roadmap items
+│   ├── slack.py                 ← sends Slack alerts (has send_test_message())
+│   └── email_reply.py           ← GPT-4o drafts reply, sends via Gmail SMTP
 ```
 
 ### Wiring pipeline.py into main.py
@@ -203,6 +206,29 @@ npm install -g @senso-ai/cli
 cd backend
 python3 pipeline.py 3   # runs all 3 signal types end-to-end
 ```
+
+---
+
+## Backend Status — What's Actually Built (as of Mar 28)
+
+All Person 1 backend work is **complete**. Nothing below needs to be built.
+
+| File | Status | Notes |
+|---|---|---|
+| `agents/transcriber.py` | ✅ Done | Whisper API; fallback when no GEMINI_API_KEY |
+| `agents/classifier.py` | ✅ Done | GPT-4o; BUG/FEATURE_REQUEST/CHURN_RISK/PRAISE/QUESTION |
+| `agents/gemini_processor.py` | ✅ Done | Gemini 2.5 Flash; replaces Whisper+GPT-4o in one call |
+| `agents/memory.py` | ✅ Done | Senso via `@senso-ai/cli` subprocess (not REST) |
+| `agents/router.py` | ✅ Done | Full routing table; frequency boost; email_reply action |
+| `agents/digest.py` | ✅ Done | CEO digest via Senso search + GPT-4o summary |
+| `agents/email_poller.py` | ✅ Done | Gmail IMAP; polls every 30s; filters to today's unseen |
+| `integrations/jira.py` | ✅ Done | Creates tickets; deduplicates by company |
+| `integrations/notion.py` | ✅ Done | Creates roadmap items |
+| `integrations/slack.py` | ✅ Done | Sends alerts; urgency-colored emojis |
+| `integrations/email_reply.py` | ✅ Done | GPT-4o drafts reply; sends via Gmail SMTP |
+| `pipeline.py` | ✅ Done | `run_pipeline(input, broadcast)` wires everything |
+
+**Gemini is active** when `GEMINI_API_KEY` is set in `.env`. Falls back to Whisper + GPT-4o otherwise.
 
 ---
 
@@ -388,56 +414,30 @@ signal_pipeline = rt.agent_node(
 ```
 
 ### Senso.ai — Memory and Knowledge Layer
-Install skills first:
+
+> **Note:** Senso does NOT have a REST API. The backend uses the `@senso-ai/cli` npm package
+> via subprocess. Do not call `api.senso.ai` directly — it will 404.
+
+Install the CLI on any machine running the backend:
 ```bash
-npx @senso-ai/shipables install senso-ai/senso-ingest
-npx @senso-ai/shipables install senso-ai/senso-search
+npm install -g @senso-ai/cli
+senso login   # authenticate once with SENSO_API_KEY
 ```
 
-Three types of content stored in Senso:
+The backend (`agents/memory.py`) calls the CLI internally — you do not need to invoke it
+yourself. Three types of content are stored:
 
-**1. Customer signals**
-```python
-# backend/agents/memory.py
-import requests, os
+**1. Customer signals** — ingested after every pipeline run via `ingest_signal()`
 
-SENSO_API = "https://api.senso.ai"
-HEADERS = {"Authorization": f"Bearer {os.environ['SENSO_API_KEY']}"}
-
-async def ingest_signal(signal: dict) -> str:
-    content = f"""
-Customer: {signal['customer']} at {signal['company']}
-Type: {signal['classification']}
-Urgency: {signal['urgency']}/10
-Summary: {signal['text'][:500]}
-Key phrases: {', '.join(signal['key_phrases'])}
-Actions taken: {signal.get('actions_summary', 'none')}
-    """
-    r = requests.post(f"{SENSO_API}/content", headers=HEADERS, json={
-        "text": content,
-        "metadata": {
-            "type": "customer_signal",
-            "classification": signal['classification'],
-            "company": signal['company'],
-            "urgency": signal['urgency']
-        }
-    })
-    return r.json()["id"]
-
-async def search_similar_signals(key_phrases: list[str], classification: str) -> dict:
-    query = f"{classification}: {' '.join(key_phrases[:3])}"
-    r = requests.get(f"{SENSO_API}/search", headers=HEADERS,
-        params={"query": query, "limit": 10})
-    results = r.json()["results"]
-    return {
-        "frequency": len(results),
-        "related_signals": results
-    }
-```
-
-**2. CEO digest** — appended to throughout the day, retrieved on GET /digest
+**2. CEO digest** — searched and formatted by `digest.py` via `generate_digest()`
 
 **3. Roadmap state** — synced when Notion updates happen
+
+CLI commands used internally (for reference):
+```bash
+senso ingest upload <file.txt>                        # ingest a signal
+senso search context "<query>" --max-results 10       # semantic search
+```
 
 ### Jira Integration
 ```python
@@ -575,6 +575,10 @@ Use App Platform, not raw droplets.
 
 OPENAI_API_KEY=sk-...
 
+# Gemini (optional — if set, uses Gemini 2.5 Flash instead of Whisper + GPT-4o)
+# Get from Google AI Studio: https://aistudio.google.com/app/apikey
+GEMINI_API_KEY=...
+
 SENSO_API_KEY=...
 SENSO_KB_ID=...
 
@@ -587,6 +591,11 @@ NOTION_API_KEY=secret_...
 NOTION_ROADMAP_DB_ID=...
 
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+
+# Gmail — for inbox polling + sending reply emails
+GMAIL_USER=you@gmail.com
+GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx   # Gmail app password (not account password)
+                                          # Generate at: myaccount.google.com/apppasswords
 
 UNKEY_ROOT_KEY=...
 UNKEY_API_ID=...
@@ -790,16 +799,18 @@ npx @senso-ai/shipables publish
 
 ## Definition of Done (4:30pm Checklist)
 
-- [ ] Audio upload triggers full pipeline end to end
-- [ ] Real Jira ticket created by agent (not manually)
-- [ ] Real Slack message sent by agent (not manually)
-- [ ] Notion roadmap updated by agent (not manually)
-- [ ] Senso stores every processed signal
-- [ ] CEO digest generates from real stored signals
-- [ ] Frontend shows live activity feed via SSE
-- [ ] Frontend chat answers questions about customer signals
-- [ ] Live public URL on DigitalOcean
-- [ ] Unkey auth on all routes
+- [x] Audio upload triggers full pipeline end to end *(Person 1 done)*
+- [x] Real Jira ticket created by agent (not manually) *(deduplication included)*
+- [x] Real Slack message sent by agent (not manually)
+- [x] Notion roadmap updated by agent (not manually)
+- [x] Senso stores every processed signal
+- [x] CEO digest generates from real stored signals
+- [x] Email inbox polled automatically (Gmail IMAP, every 30s)
+- [x] Auto-reply email drafted + sent by agent (Gmail SMTP)
+- [ ] Frontend shows live activity feed via SSE *(Person 2)*
+- [ ] Frontend chat answers questions about customer signals *(Person 2)*
+- [ ] Live public URL on DigitalOcean *(Person 2)*
+- [ ] Unkey auth on all routes *(Person 2)*
 - [ ] Demo rehearsed 3 times, fits in 3 minutes
 - [ ] Devpost submitted
 - [ ] Published to Shipables
