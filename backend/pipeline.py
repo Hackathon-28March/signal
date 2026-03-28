@@ -133,20 +133,47 @@ async def process_signal(signal_type: str, content: str,
         else:
             print(f"  [{stage.upper()}] {message}")
 
-    # Stage 1: Transcribe
-    await emit("transcribe", "Transcribing signal...")
-    if signal_type == "audio":
-        import base64
-        from agents.transcriber import transcribe_audio_bytes
-        audio_bytes = base64.b64decode(content)
-        text = transcribe_audio_bytes(audio_bytes)
-    else:
-        text = content
-    await emit("transcribe", f"Transcribed ({len(text)} chars)", "success")
+    # Stage 1: Transcribe + Classify
+    # Use Gemini multimodal if key is set (single call for audio),
+    # otherwise fall back to Whisper + GPT-4o (two calls)
+    use_gemini = bool(os.environ.get("GEMINI_API_KEY"))
 
-    # Stage 1: Classify
-    await emit("classify", "Classifying signal...")
-    classification: ClassifyOutput = await classify(ClassifyInput(text=text))
+    if use_gemini:
+        model_label = "Gemini 2.5 Flash (multimodal)"
+        await emit("transcribe", f"Processing with {model_label}...")
+        from agents.gemini_processor import gemini_process, GeminiInput
+        gemini_result = await gemini_process(GeminiInput(
+            signal_type=signal_type,
+            content=content,
+        ))
+        text = gemini_result.text
+        # Wrap as ClassifyOutput-compatible object
+        from agents.classifier import ClassifyOutput
+        classification = ClassifyOutput(
+            text=gemini_result.text,
+            classification=gemini_result.classification,
+            urgency=gemini_result.urgency,
+            customer=gemini_result.customer,
+            company=gemini_result.company,
+            key_phrases=gemini_result.key_phrases,
+            sentiment=gemini_result.sentiment,
+        )
+        await emit("transcribe", f"Transcribed ({len(text)} chars)", "success")
+    else:
+        model_label = "Whisper + GPT-4o"
+        await emit("transcribe", f"Transcribing with {model_label}...")
+        if signal_type == "audio":
+            import base64
+            from agents.transcriber import transcribe_audio_bytes
+            audio_bytes = base64.b64decode(content)
+            text = transcribe_audio_bytes(audio_bytes)
+        else:
+            text = content
+        await emit("transcribe", f"Transcribed ({len(text)} chars)", "success")
+
+        await emit("classify", "Classifying signal...")
+        classification = await classify(ClassifyInput(text=text))
+
     await emit("classify",
                f"Classified as {classification.classification} "
                f"(urgency {classification.urgency}/10) — "
